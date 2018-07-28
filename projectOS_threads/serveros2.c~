@@ -1,0 +1,112 @@
+#include "headeros2.h" //this header includes all the declarations of the functions used by the server
+			//it also includes some global variables used
+
+
+int main( int argc, char **argv )
+{ 
+	//here we set the values for act structure, declared in the header file. This structure is needed to call
+	//sigaction(SIGALRM, &act, NULL), which is similar to signal() function.
+	//sigaction will be used to handle only the SIGALRM signal	
+	act.sa_handler = &sig_alrm;  //we set the handler to be sig_alrm function. Take a look at functions.c
+	sigemptyset(&(act.sa_mask)); //(act.sa_mask = 0;) this is used to block other signals that can be raised by other processes. We won't need this.
+	act.sa_flags = SA_RESTART;  // Restart interrupted system calls. This enables the periodical activation of the signal using alarm()
+
+	alarm(30); /*from now on, every 30 secs a transaction from the company to the theatre happens*/	
+
+	
+	signal( SIGINT, sig_int );       //SIGINT will be used for the server's termination
+	sigaction(SIGALRM, &act, NULL);  //SIGALRM will be used for the money transactions
+	
+	/* Initialize mutex and condition variable objects */
+     	pthread_mutex_init(&mutexTHL, NULL);
+	pthread_mutex_init(&mutexBANK, NULL);
+	pthread_mutex_init(&mutexMEMORY, NULL);
+	
+     	pthread_cond_init (&myconvarTHL, NULL);	
+	pthread_cond_init (&myconvarBANK, NULL);	
+
+	/*Initialize phone and bank counters*/	
+	countTHL = 0;	
+	countBANK = 0;
+	
+	/*SET t_seatfind time (notice that we set it as 4, not as 6, take a look at the report)*/	
+	tim.tv_sec = 4;
+   	tim.tv_nsec = 0;
+
+	/*SET t_cardcheck time*/
+	Tcardcheck.tv_sec = 2;
+	Tcardcheck.tv_nsec = 0;
+
+	OverallOrders = 0;
+	FailedOrders = 0;
+	/*--------------SHARED MEMORY SETUP-------------------------------------------------------------------*/
+      
+
+        shm.companyMoney = 0;  //we start inserting data into the segment
+        shm.theatreMoney = 0;
+        shm.seats = 640; //number of free seats
+        int i;
+        for(i = 0; i < 100; i++) shm.planA[i] = 0; //all seats in every zone are empty
+        for(i = 0; i < 130; i++) shm.planB[i] = 0;
+        for(i = 0; i < 180; i++) shm.planC[i] = 0;
+        for(i = 0; i < 230; i++) shm.planD[i] = 0;
+      
+        shm.A = 0; shm.B = 0; shm.C = 0; shm.D = 0; //number of reserved seats in each zone
+        shm.waiting = (double)0; //we reset our time variables. They will be used to calculate average times
+        shm.serving = (double)0;
+
+        for(i = 0; i < 150; i++) shm.transactions[i] = 0; //we initialize with 0 our transactions
+        shm.nOfTrans = 0; //number of money transactions
+
+	
+ 
+
+	/*--------------SOCKET SETUP--------------------------------------------------------------------------*/     
+
+	pthread_attr_init( &attr ); // initialize and set the thread attributes   
+	pthread_attr_setdetachstate( &attr, PTHREAD_CREATE_JOINABLE ); //Threads that are created using attr will be created in a joinable state.
+
+	socklen_t clilen;
+        struct sockaddr_un cliaddr, servaddr; /* Structs for the client and server socket addresses. */	
+	listenfd = socket( AF_LOCAL, SOCK_STREAM, 0 ); /* Create the server's endpoint */
+
+	/* if there is in the disk a socketfile with the same name (from a previous execution of the server) it will get deleted */
+        unlink( UNIXSTR_PATH ); /* Remove any previous socket with the same filename. */
+
+        bzero( &servaddr, sizeof( servaddr ) ); /* Zero all fields of servaddr. */
+        servaddr.sun_family = AF_LOCAL; /* Socket type is local (Unix Domain). */
+        strcpy( servaddr.sun_path, UNIXSTR_PATH ); /* Define the name of this socket. */
+
+	/* Create the file for the socket and register it as a socket. */
+        bind( listenfd, ( struct sockaddr* ) &servaddr, sizeof( servaddr ) );
+
+        listen( listenfd, LISTENQ ); /* Create request queue of size LISTENQ. */
+
+
+        for ( ; ; ) { //this infinite for loop is used by the server to constantly accept new  client requests from the listen queue!!
+
+	      clilen = sizeof( cliaddr ); //we will need this to accept a request, see below
+
+              connfd = accept( listenfd, ( struct sockaddr * ) &cliaddr, &clilen ); /* Copy next request from the queue to connfd and remove it from the queue. */
+
+              if ( connfd < 0 ) { //request accept failure!
+                     if ( errno == EINTR ) /* Something interrupted us. */
+                            continue; /* Back to for()... */
+                     else {
+                            fprintf( stderr, "Accept Error\n" );
+                            exit( 0 );
+                     }
+              }
+
+          
+	  new_sock = malloc(1); //new_sock declared in headeros2.h -- each thread must have ITS OWN socket descriptor. Using malloc(), we allocate space for 1
+				//socket descriptor in the heap. Its value must be the same as connfd (the result of accept() function), which is the client socket.
+				//the pointer to the new (allocated) socket descriptor is passed to the phone thread, using pthread_create(). The new socket descriptor
+				//is freed before the phone thread exits.
+          *new_sock = connfd; 
+
+	  pthread_t child; //we will create a new thread to handle the new request
+	  tmp = pthread_create(&child, &attr, *thread_functionTHL, (void *)new_sock );
+	  
+       }
+}
